@@ -1,6 +1,6 @@
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
     sync::Mutex,
@@ -36,6 +36,7 @@ struct PokemonView {
     pokemon_types: Vec<TypeBadge>,
     strong_against: Vec<TypeBadge>,
     weak_against: Vec<TypeBadge>,
+    matchup_details: PokemonMatchupDetails,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +46,23 @@ struct PokemonInfo {
     display_name: String,
     image: String,
     types: Vec<String>,
+    #[serde(default)]
+    matchup_details: Option<PokemonMatchupDetails>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PokemonMatchupDetails {
+    entries: Vec<MatchupEntry>,
+    strong_against: Vec<String>,
+    weak_against: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MatchupEntry {
+    #[serde(rename = "type")]
+    type_name: String,
+    attack: f64,
+    defense: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -287,6 +305,7 @@ async fn get_pokemon_info(state: &AppState, name: &str) -> Result<PokemonInfo, S
             .into_iter()
             .map(|slot| slot.type_info.name)
             .collect(),
+        matchup_details: None,
     };
 
     write_pokemon_cache(state, name.to_string(), info.clone())?;
@@ -365,6 +384,109 @@ fn into_badge(type_info: &TypeInfo) -> TypeBadge {
     }
 }
 
+#[derive(Debug, Clone)]
+struct MatchupAccumulator {
+    attack: f64,
+    defense: f64,
+}
+
+impl Default for MatchupAccumulator {
+    fn default() -> Self {
+        Self {
+            attack: 1.0,
+            defense: 1.0,
+        }
+    }
+}
+
+fn is_neutral(value: f64) -> bool {
+    (value - 1.0).abs() < f64::EPSILON
+}
+
+fn is_favorable(entry: &MatchupEntry) -> bool {
+    entry.attack > 1.0 || entry.defense < 1.0
+}
+
+fn is_unfavorable(entry: &MatchupEntry) -> bool {
+    entry.attack < 1.0 || entry.defense > 1.0
+}
+
+async fn build_matchup_details(
+    state: &AppState,
+    pokemon_types: &[String],
+) -> Result<PokemonMatchupDetails, String> {
+    let mut accumulators: HashMap<String, MatchupAccumulator> = HashMap::new();
+
+    for type_name in pokemon_types {
+        let type_info = get_type_info(state, type_name).await?;
+
+        for name in &type_info.damage_relations.attack_double {
+            let entry = accumulators.entry(name.clone()).or_default();
+            entry.attack *= 2.0;
+        }
+
+        for name in &type_info.damage_relations.attack_half {
+            let entry = accumulators.entry(name.clone()).or_default();
+            entry.attack *= 0.5;
+        }
+
+        for name in &type_info.damage_relations.attack_none {
+            let entry = accumulators.entry(name.clone()).or_default();
+            entry.attack *= 0.0;
+        }
+
+        for name in &type_info.damage_relations.defense_double {
+            let entry = accumulators.entry(name.clone()).or_default();
+            entry.defense *= 2.0;
+        }
+
+        for name in &type_info.damage_relations.defense_half {
+            let entry = accumulators.entry(name.clone()).or_default();
+            entry.defense *= 0.5;
+        }
+
+        for name in &type_info.damage_relations.defense_none {
+            let entry = accumulators.entry(name.clone()).or_default();
+            entry.defense *= 0.0;
+        }
+    }
+
+    let mut entries = Vec::new();
+    for (type_name, accumulator) in accumulators {
+        if is_neutral(accumulator.attack) && is_neutral(accumulator.defense) {
+            continue;
+        }
+
+        entries.push(MatchupEntry {
+            type_name,
+            attack: accumulator.attack,
+            defense: accumulator.defense,
+        });
+    }
+
+    entries.sort_by(|left, right| left.type_name.cmp(&right.type_name));
+
+    let mut strong_against = Vec::new();
+    let mut weak_against = Vec::new();
+
+    for entry in &entries {
+        let favorable = is_favorable(entry);
+        let unfavorable = is_unfavorable(entry);
+
+        if favorable && !unfavorable {
+            strong_against.push(entry.type_name.clone());
+        } else if unfavorable && !favorable {
+            weak_against.push(entry.type_name.clone());
+        }
+    }
+
+    Ok(PokemonMatchupDetails {
+        entries,
+        strong_against,
+        weak_against,
+    })
+}
+
 #[tauri::command]
 async fn get_pokemon_matchup(
     name: String,
@@ -375,54 +497,32 @@ async fn get_pokemon_matchup(
         return Err("Please enter a Pokemon name or ID.".to_string());
     }
 
-    let pokemon = get_pokemon_info(&state, &normalized_name).await?;
+    let mut pokemon = get_pokemon_info(&state, &normalized_name).await?;
+
+    let matchup_details = match pokemon.matchup_details.clone() {
+        Some(details) => details,
+        None => {
+            let details = build_matchup_details(&state, &pokemon.types).await?;
+            pokemon.matchup_details = Some(details.clone());
+            write_pokemon_cache(&state, normalized_name.clone(), pokemon.clone())?;
+            details
+        }
+    };
 
     let mut pokemon_types = Vec::new();
-    let mut strong_against = BTreeSet::new();
-    let mut weak_against = BTreeSet::new();
-
     for type_name in &pokemon.types {
         let type_info = get_type_info(&state, type_name).await?;
         pokemon_types.push(into_badge(&type_info));
-
-        for name in &type_info.damage_relations.attack_double {
-            strong_against.insert(name.clone());
-        }
-        for name in &type_info.damage_relations.attack_half {
-            weak_against.insert(name.clone());
-        }
-        for name in &type_info.damage_relations.attack_none {
-            weak_against.insert(name.clone());
-        }
-        for name in &type_info.damage_relations.defense_double {
-            weak_against.insert(name.clone());
-        }
-        for name in &type_info.damage_relations.defense_half {
-            strong_against.insert(name.clone());
-        }
-        for name in &type_info.damage_relations.defense_none {
-            strong_against.insert(name.clone());
-        }
-    }
-
-    let overlapping: Vec<String> = strong_against
-        .intersection(&weak_against)
-        .cloned()
-        .collect();
-
-    for type_name in overlapping {
-        strong_against.remove(&type_name);
-        weak_against.remove(&type_name);
     }
 
     let mut strong_badges = Vec::new();
-    for type_name in strong_against {
+    for type_name in &matchup_details.strong_against {
         let type_info = get_type_info(&state, &type_name).await?;
         strong_badges.push(into_badge(&type_info));
     }
 
     let mut weak_badges = Vec::new();
-    for type_name in weak_against {
+    for type_name in &matchup_details.weak_against {
         let type_info = get_type_info(&state, &type_name).await?;
         weak_badges.push(into_badge(&type_info));
     }
@@ -435,6 +535,7 @@ async fn get_pokemon_matchup(
         pokemon_types,
         strong_against: strong_badges,
         weak_against: weak_badges,
+        matchup_details,
     })
 }
 
