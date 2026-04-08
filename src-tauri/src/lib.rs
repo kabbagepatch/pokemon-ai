@@ -1,6 +1,7 @@
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
     collections::HashMap,
+    env,
     fs,
     path::{Path, PathBuf},
     sync::Mutex,
@@ -10,6 +11,10 @@ use tauri::{Manager, State};
 
 const BASE_URL: &str = "https://pokeapi.co/api/v2";
 const CACHE_TTL: Duration = Duration::from_secs(60 * 60 * 24 * 365);
+const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
+const ANTHROPIC_API_VERSION: &str = "2023-06-01";
+const ANTHROPIC_MODEL: &str = "claude-sonnet-4-20250514";
+const ANTHROPIC_MAX_TOKENS: u32 = 800;
 
 struct AppState {
     client: reqwest::Client,
@@ -99,6 +104,96 @@ struct TeamPokemonDetails {
     display_name: String,
     image: String,
     pokemon_types: Vec<TypeBadge>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiRecommendationView {
+    summary: String,
+    recommendations: Vec<AiRecommendationEntryView>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AiRecommendationEntryView {
+    entry_id: u64,
+    pokemon_name: String,
+    nickname: String,
+    level: u8,
+    image: String,
+    reason: String,
+    note: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct RecommendationPromptContext {
+    opponent: PromptPokemonContext,
+    roster: Vec<PromptRosterEntryContext>,
+}
+
+#[derive(Debug, Serialize)]
+struct PromptPokemonContext {
+    name: String,
+    types: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PromptRosterEntryContext {
+    entry_id: u64,
+    is_current_team_member: bool,
+    pokemon_name: String,
+    nickname: String,
+    level: u8,
+    types: Vec<String>,
+    moves: Vec<PromptMoveContext>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PromptMoveContext {
+    name: String,
+    type_name: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicMessageRequest {
+    model: String,
+    max_tokens: u32,
+    system: String,
+    messages: Vec<AnthropicRequestMessage>,
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicRequestMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicMessageResponse {
+    content: Vec<AnthropicContentBlock>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicContentBlock {
+    #[serde(rename = "type")]
+    block_type: String,
+    text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AiModelResponse {
+    summary: String,
+    recommendations: Vec<AiRecommendationModelEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AiRecommendationModelEntry {
+    entry_id: u64,
+    reason: String,
+    note: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -550,6 +645,31 @@ fn into_team_state_view(team_data: &TeamData) -> TeamStateView {
     }
 }
 
+fn load_claude_api_key() -> Result<String, String> {
+    env::var("CLAUDE_API_KEY")
+        .map(|value| value.trim().to_string())
+        .ok()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            "Missing CLAUDE_API_KEY. Add it to your environment or local .env file.".to_string()
+        })
+}
+
+fn extract_json_object(text: &str) -> Result<&str, String> {
+    let start = text
+        .find('{')
+        .ok_or_else(|| "Claude did not return JSON.".to_string())?;
+    let end = text
+        .rfind('}')
+        .ok_or_else(|| "Claude did not return JSON.".to_string())?;
+
+    if end < start {
+        return Err("Claude returned malformed JSON.".to_string());
+    }
+
+    Ok(&text[start..=end])
+}
+
 async fn validate_team_entry(
     state: &AppState,
     input: TeamEntryInput,
@@ -737,6 +857,119 @@ async fn build_matchup_details(
     })
 }
 
+async fn ensure_pokemon_matchup_details(
+    state: &AppState,
+    lookup_key: &str,
+) -> Result<PokemonInfo, String> {
+    let mut pokemon = get_pokemon_info(state, lookup_key).await?;
+
+    if pokemon.matchup_details.is_none() {
+        let details = build_matchup_details(state, &pokemon.types).await?;
+        pokemon.matchup_details = Some(details);
+        write_pokemon_cache(state, lookup_key.to_string(), pokemon.clone())?;
+    }
+
+    Ok(pokemon)
+}
+
+fn into_prompt_moves(moves: &[Option<MoveInfo>]) -> Vec<PromptMoveContext> {
+    moves
+        .iter()
+        .filter_map(|move_info| move_info.as_ref())
+        .map(|move_info| PromptMoveContext {
+            name: move_info.name.clone(),
+            type_name: move_info.type_name.clone(),
+        })
+        .collect()
+}
+
+async fn build_prompt_pokemon_context(
+    state: &AppState,
+    lookup_key: &str,
+) -> Result<PromptPokemonContext, String> {
+    let pokemon = ensure_pokemon_matchup_details(state, lookup_key).await?;
+
+    Ok(PromptPokemonContext {
+        name: pokemon.name,
+        types: pokemon.types,
+    })
+}
+
+async fn build_prompt_roster_entry_context(
+    state: &AppState,
+    entry: &TeamEntry,
+    is_current_team_member: bool,
+) -> Result<PromptRosterEntryContext, String> {
+    let pokemon = ensure_pokemon_matchup_details(state, &entry.pokemon_name).await?;
+
+    Ok(PromptRosterEntryContext {
+        entry_id: entry.id,
+        is_current_team_member,
+        pokemon_name: pokemon.name,
+        nickname: entry.nickname.clone(),
+        level: entry.level,
+        types: pokemon.types,
+        moves: into_prompt_moves(&entry.moves),
+    })
+}
+
+async fn request_claude_recommendation(
+    client: &reqwest::Client,
+    api_key: &str,
+    prompt_context: &RecommendationPromptContext,
+) -> Result<AiModelResponse, String> {
+    let prompt_json = serde_json::to_string(prompt_context)
+        .map_err(|error| format!("Failed to serialize AI prompt context: {error}"))?;
+
+    let request_body = AnthropicMessageRequest {
+        model: ANTHROPIC_MODEL.to_string(),
+        max_tokens: ANTHROPIC_MAX_TOKENS,
+        system: "You are a Pokemon battle assistant. Recommend the best available saved Pokemon to use against the provided opponent. Use only the supplied roster and opponent data. Use the roster Pokemon types and move types as primary evidence when ranking candidates. Consider level, typing, and move-type coverage. Do not invent hidden stats, abilities, items, EVs, IVs, or opponent moves. Return valid JSON only with this exact shape: {\"summary\":\"string\",\"recommendations\":[{\"entryId\":number,\"reason\":\"string\",\"note\":\"string or null\"}]}. Return at most 3 recommendations ranked best to worst. Every entryId must come from the provided roster.".to_string(),
+        messages: vec![AnthropicRequestMessage {
+            role: "user".to_string(),
+            content: format!(
+                "Here is the battle context as JSON. Choose the best available Pokemon from the roster.\n{prompt_json}"
+            ),
+        }],
+    };
+    let request_body_json = serde_json::to_string(&request_body)
+        .map_err(|error| format!("Failed to serialize Claude request body: {error}"))?;
+
+    let response = client
+        .post(ANTHROPIC_API_URL)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", ANTHROPIC_API_VERSION)
+        .header("content-type", "application/json")
+        .body(request_body_json)
+        .send()
+        .await
+        .map_err(|error| format!("Failed to reach Claude: {error}"))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let _ = response.text().await;
+        return Err(format!(
+            "Claude could not produce a recommendation right now (status {status}). Please try again."
+        ));
+    }
+
+    let payload = response
+        .json::<AnthropicMessageResponse>()
+        .await
+        .map_err(|error| format!("Failed to parse Claude response: {error}"))?;
+
+    let text = payload
+        .content
+        .iter()
+        .find(|block| block.block_type == "text")
+        .and_then(|block| block.text.as_deref())
+        .ok_or_else(|| "Claude returned no text content.".to_string())?;
+    let json_text = extract_json_object(text)?;
+
+    serde_json::from_str::<AiModelResponse>(json_text)
+        .map_err(|error| format!("Claude returned invalid recommendation JSON: {error}"))
+}
+
 #[tauri::command]
 async fn get_pokemon_matchup(
     name: String,
@@ -747,17 +980,11 @@ async fn get_pokemon_matchup(
         return Err("Please enter a Pokemon name or ID.".to_string());
     }
 
-    let mut pokemon = get_pokemon_info(&state, &normalized_name).await?;
-
-    let matchup_details = match pokemon.matchup_details.clone() {
-        Some(details) => details,
-        None => {
-            let details = build_matchup_details(&state, &pokemon.types).await?;
-            pokemon.matchup_details = Some(details.clone());
-            write_pokemon_cache(&state, normalized_name.clone(), pokemon.clone())?;
-            details
-        }
-    };
+    let pokemon = ensure_pokemon_matchup_details(&state, &normalized_name).await?;
+    let matchup_details = pokemon
+        .matchup_details
+        .clone()
+        .ok_or_else(|| "Pokemon matchup details were missing.".to_string())?;
 
     let mut pokemon_types = Vec::new();
     for type_name in &pokemon.types {
@@ -793,6 +1020,79 @@ async fn get_pokemon_matchup(
 fn get_team_state(state: State<'_, AppState>) -> Result<TeamStateView, String> {
     let team_data = read_team_data(&state)?;
     Ok(into_team_state_view(&team_data))
+}
+
+#[tauri::command]
+async fn get_ai_recommendation(
+    opponent_name: String,
+    state: State<'_, AppState>,
+) -> Result<AiRecommendationView, String> {
+    let normalized_name = normalize_name(&opponent_name);
+    if normalized_name.is_empty() {
+        return Err("Load an opponent Pokemon before asking for a recommendation.".to_string());
+    }
+
+    let team_data = read_team_data(&state)?;
+
+    if team_data.entries.is_empty() {
+        return Err("Add some Pokemon to your team or box before asking for a recommendation."
+            .to_string());
+    }
+
+    let opponent = build_prompt_pokemon_context(&state, &normalized_name).await?;
+    let api_key = load_claude_api_key()?;
+    let mut roster = Vec::with_capacity(team_data.entries.len());
+
+    for entry in &team_data.entries {
+        let is_current_team_member = team_data.current_team.contains(&entry.id);
+        roster.push(build_prompt_roster_entry_context(&state, entry, is_current_team_member).await?);
+    }
+
+    let prompt_context = RecommendationPromptContext { opponent, roster };
+    let model_response =
+        request_claude_recommendation(&state.client, &api_key, &prompt_context).await?;
+
+    if model_response.recommendations.is_empty() {
+        return Err("Claude did not return any recommendations.".to_string());
+    }
+
+    let entry_lookup: HashMap<u64, &TeamEntry> =
+        team_data.entries.iter().map(|entry| (entry.id, entry)).collect();
+    let mut seen_entry_ids = Vec::new();
+    let mut recommendations = Vec::new();
+    for entry in model_response.recommendations.into_iter().take(3) {
+        if seen_entry_ids.contains(&entry.entry_id) {
+            continue;
+        }
+
+        seen_entry_ids.push(entry.entry_id);
+        let team_entry = entry_lookup.get(&entry.entry_id).ok_or_else(|| {
+            format!(
+                "Claude returned unknown roster entry {}.",
+                entry.entry_id
+            )
+        })?;
+        let pokemon = get_pokemon_info(&state, &team_entry.pokemon_name).await?;
+
+        recommendations.push(AiRecommendationEntryView {
+            entry_id: team_entry.id,
+            pokemon_name: team_entry.pokemon_name.clone(),
+            nickname: team_entry.nickname.clone(),
+            level: team_entry.level,
+            image: pokemon.image,
+            reason: entry.reason,
+            note: entry.note,
+        });
+    }
+
+    if recommendations.is_empty() {
+        return Err("Claude did not return any valid recommendations.".to_string());
+    }
+
+    Ok(AiRecommendationView {
+        summary: model_response.summary,
+        recommendations,
+    })
 }
 
 #[tauri::command]
@@ -871,6 +1171,8 @@ fn set_team_member(
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
+            dotenvy::dotenv().ok();
+
             let cache_root = app
                 .path()
                 .app_cache_dir()
@@ -894,6 +1196,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             get_pokemon_matchup,
+            get_ai_recommendation,
             get_team_state,
             get_team_pokemon_details,
             save_team_entry,

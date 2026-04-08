@@ -41,13 +41,13 @@ body {
   display: flex;
   justify-content: center;
   gap: 12px;
-  margin-bottom: 24px;
+  margin-bottom: 16px;
 }
 
 .nav-link {
   display: inline-block;
-  padding: 0.65rem 1rem;
-  border-radius: 999px;
+  padding: 0.25rem 1rem;
+  border-radius: 5px;
   text-decoration: none;
   color: inherit;
   background: #ffffff;
@@ -467,6 +467,7 @@ button {
 
 #pokemonImage {
   width: 250px;
+  margin-bottom: 2px;
 }
 
 .type-image {
@@ -476,5 +477,150 @@ button {
 
 #pokemonType .type-image {
   width: 120px;
-  margin-bottom: 10px;
+}
+
+#weakAgainst h3 {
+  margin-top: 0;
+}
+
+.ai-recommendation-panel {
+  display: grid;
+  gap: 8px;
+  padding-top: 0;
+  margin: 20px 0;
+}
+
+.ai-status {
+  margin: 0;
+  margin-left: 10px;
+  text-align: left;
+}
+
+.ai-action-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  justify-self: center;
+  padding: 0.45em 1em;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #d9ecff 0%, #b9d7fb 100%);
+  color: #12365f;
+  box-shadow: 0 6px 18px rgba(55, 110, 183, 0.18);
+  border-color: rgba(56, 106, 168, 0.28);
+}
+
+.ai-action-button:hover {
+  border-color: rgba(40, 89, 150, 0.48);
+}
+
+.ai-action-button:active {
+  background: linear-gradient(180deg, #c8e1fb 0%, #a8caf3 100%);
+}
+
+.ai-sparkle {
+  font-size: 1.5rem;
+  line-height: 1;
+}
+
+#aiRecommendationResults {
+  display: grid;
+  gap: 12px;
+}
+
+.ai-summary {
+  margin: 5px;
+  text-align: justify;
+}
+
+.ai-recommendation-list {
+  display: grid;
+  gap: 10px;
+}
+
+.ai-recommendation-card {
+  padding: 8px 14px;
+  border-radius: 14px;
+  border: 1px solid #d9d9d9;
+  background: #fbfbfb;
+  text-align: left;
+}
+
+.ai-recommendation-rank {
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #666666;
+  margin-bottom: 4px;
+}
+
+.ai-recommendation-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 4px 0;
+}
+
+.ai-recommendation-header h4,
+.ai-recommendation-header p,
+.ai-recommendation-card p {
+  margin: 0;
+}
+
+.ai-recommendation-species {
+  color: #666666;
+}
+
+.ai-recommendation-thumbnail {
+  width: 85px;
+  height: 85px;
+  object-fit: contain;
+  flex-shrink: 0;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.65);
+  padding: 4px;
+}
+
+.ai-recommendation-note {
+  color: #666666;
+  font-size: 0.85rem;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+@media (prefers-color-scheme: dark) {
+  .ai-recommendation-card {
+    background: #17171c;
+    border-color: #8f7ac6;
+  }
+
+  .ai-action-button {
+    background: linear-gradient(180deg, #383247 0%, #26212f 100%);
+    color: #f0ebff;
+    border-color: rgba(160, 137, 222, 0.28);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25);
+  }
+
+  .ai-action-button:hover {
+    border-color: rgba(160, 137, 222, 0.44);
+  }
+
+  .ai-action-button:active {
+    background: linear-gradient(180deg, #302b3d 0%, #1f1b27 100%);
+  }
+
+  .ai-recommendation-rank,
+  .ai-recommendation-species,
+  .ai-recommendation-note {
+    color: #c9c9c9;
+  }
+
+  .ai-recommendation-thumbnail {
+    background: rgba(255, 255, 255, 0.06);
+  }
 }
