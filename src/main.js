@@ -14,6 +14,10 @@ const pokemonTypesBlock = document.getElementById('pokemonType').getElementsByCl
 const strongAgainstBlock = document.getElementById('strongAgainst').getElementsByClassName('pokemonTypes')[0];
 const weakAgainstBlock = document.getElementById('weakAgainst').getElementsByClassName('pokemonTypes')[0];
 
+document.querySelectorAll('[data-desktop-only]').forEach((element) => {
+  element.hidden = !isDesktopRuntime;
+});
+
 const clearTypeBlock = (block) => {
   block.innerHTML = '';
 };
@@ -183,13 +187,15 @@ const populatePokemonInfo = async (name) => {
     appendTypeImages(pokemonTypesBlock, pokemon.pokemonTypes);
     appendTypeImages(strongAgainstBlock, pokemon.strongAgainst);
     appendTypeImages(weakAgainstBlock, pokemon.weakAgainst);
+
+    localStorage.setItem('recent-lookup', name)
   } catch (error) {
     console.error(error);
     alert(`Pokemon ${name} not found. Check the spelling or try using the Pokemon ID.`);
   }
 };
 
-populatePokemonInfo((Math.floor(Math.random() * 900)).toString());
+populatePokemonInfo(localStorage.getItem('recent-lookup') || (Math.floor(Math.random() * 900)).toString());
 
 const searchForm = document.getElementById('searchForm');
 searchForm.addEventListener('submit', (event) => {
