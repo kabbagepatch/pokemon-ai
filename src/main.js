@@ -3,6 +3,7 @@ const isDesktopRuntime = typeof invoke === 'function';
 const BASE_URL = 'https://pokeapi.co/api/v2';
 
 let currentPokemon = null;
+let aiRecommendationRequestInFlight = false;
 
 const pokemonCache = new Map();
 const typeCache = new Map();
@@ -13,6 +14,9 @@ const pokemonImage = document.getElementById('pokemonImage');
 const pokemonTypesBlock = document.getElementById('pokemonType').getElementsByClassName('pokemonTypes')[0];
 const strongAgainstBlock = document.getElementById('strongAgainst').getElementsByClassName('pokemonTypes')[0];
 const weakAgainstBlock = document.getElementById('weakAgainst').getElementsByClassName('pokemonTypes')[0];
+const aiRecommendButton = document.getElementById('aiRecommendButton');
+const aiRecommendationStatus = document.getElementById('aiRecommendationStatus');
+const aiRecommendationResults = document.getElementById('aiRecommendationResults');
 
 document.querySelectorAll('[data-desktop-only]').forEach((element) => {
   element.hidden = !isDesktopRuntime;
@@ -32,6 +36,50 @@ const capitalize = (value) => {
 
 const normalizePokemonName = (name) => name.trim().toLowerCase();
 
+const formatDisplayName = (value) => value
+  .split('-')
+  .map(capitalize)
+  .join(' ');
+
+const setAiStatus = (message) => {
+  if (!aiRecommendationStatus) {
+    return;
+  }
+
+  aiRecommendationStatus.textContent = message;
+  aiRecommendationStatus.hidden = !message;
+};
+
+const updateAiButtonState = () => {
+  if (!aiRecommendButton) {
+    return;
+  }
+
+  aiRecommendButton.disabled = aiRecommendationRequestInFlight || !currentPokemon;
+};
+
+const setAiLoadingState = (isLoading) => {
+  aiRecommendationRequestInFlight = isLoading;
+
+  if (!aiRecommendButton) {
+    return;
+  }
+
+  aiRecommendButton.innerHTML = isLoading
+    ? '<span class="ai-sparkle" aria-hidden="true">✦</span><span>Thinking...</span>'
+    : '<span class="ai-sparkle" aria-hidden="true">✦</span><span>Help Me Choose</span>';
+  updateAiButtonState();
+};
+
+const resetAiRecommendationView = () => {
+  if (!aiRecommendationResults) {
+    return;
+  }
+
+  aiRecommendationResults.hidden = true;
+  aiRecommendationResults.innerHTML = '';
+};
+
 const appendTypeImages = (block, types) => {
   clearTypeBlock(block);
 
@@ -47,6 +95,33 @@ const appendTypeImages = (block, types) => {
     image.className = 'type-image';
     block.appendChild(image);
   });
+};
+
+const renderAiRecommendations = (recommendation) => {
+  if (!aiRecommendationResults) {
+    return;
+  }
+
+  const recommendationCards = recommendation.recommendations.map((entry, index) => `
+    <article class="ai-recommendation-card">
+      <div class="ai-recommendation-header">
+        <div>
+          <span class="ai-recommendation-rank">#${index + 1} Pick</span>
+          <h4>${entry.nickname || formatDisplayName(entry.pokemonName)}</h4>
+          <span class="ai-recommendation-species">${formatDisplayName(entry.pokemonName)} • Lv. ${entry.level}</span>
+          ${entry.note ? `<div class="ai-recommendation-note">${entry.note}</div>` : ''}
+        </div>
+        <img class="ai-recommendation-thumbnail" src="${entry.image}" alt="${formatDisplayName(entry.pokemonName)}" />
+      </div>
+      <p>${entry.reason}</p>
+    </article>
+  `).join('');
+
+  aiRecommendationResults.innerHTML = `
+    <p class="ai-summary">${recommendation.summary}</p>
+    <div class="ai-recommendation-list">${recommendationCards}</div>
+  `;
+  aiRecommendationResults.hidden = false;
 };
 
 const fetchJson = async (path) => {
@@ -176,6 +251,10 @@ const getPokemonMatchup = (name) => (
 
 const populatePokemonInfo = async (name) => {
   try {
+    setAiLoadingState(false);
+    resetAiRecommendationView();
+    setAiStatus('');
+
     const pokemon = await getPokemonMatchup(name);
     currentPokemon = pokemon;
     resultsBlock.hidden = false;
@@ -188,9 +267,16 @@ const populatePokemonInfo = async (name) => {
     appendTypeImages(strongAgainstBlock, pokemon.strongAgainst);
     appendTypeImages(weakAgainstBlock, pokemon.weakAgainst);
 
-    localStorage.setItem('recent-lookup', name)
+    setAiStatus('');
+    updateAiButtonState();
+
+    localStorage.setItem('recent-lookup', name);
   } catch (error) {
     console.error(error);
+    currentPokemon = null;
+    updateAiButtonState();
+    resetAiRecommendationView();
+    setAiStatus('');
     alert(`Pokemon ${name} not found. Check the spelling or try using the Pokemon ID.`);
   }
 };
@@ -234,3 +320,30 @@ document.getElementById('nextButton').addEventListener('click', (event) => {
   const id = Number.parseInt(currentPokemon.id, 10);
   populatePokemonInfo((id + 1).toString());
 });
+
+if (aiRecommendButton) {
+  aiRecommendButton.addEventListener('click', async () => {
+    if (!isDesktopRuntime || !currentPokemon || aiRecommendationRequestInFlight) {
+      return;
+    }
+
+    resetAiRecommendationView();
+    setAiStatus(`Analyzing your roster against ${currentPokemon.displayName}...`);
+    setAiLoadingState(true);
+
+    try {
+      const recommendation = await invoke('get_ai_recommendation', {
+        opponentName: currentPokemon.name,
+      });
+      renderAiRecommendations(recommendation);
+      setAiStatus(null);
+    } catch (error) {
+      console.error(error);
+      setAiStatus(typeof error === 'string' ? error : 'AI recommendation failed. Please try again.');
+    } finally {
+      setAiLoadingState(false);
+    }
+  });
+}
+
+updateAiButtonState();
