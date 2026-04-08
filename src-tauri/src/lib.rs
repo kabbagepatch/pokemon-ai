@@ -14,8 +14,10 @@ const CACHE_TTL: Duration = Duration::from_secs(60 * 60 * 24 * 365);
 struct AppState {
     client: reqwest::Client,
     cache_root: PathBuf,
+    data_root: PathBuf,
     pokemon_cache: Mutex<HashMap<String, PokemonInfo>>,
     type_cache: Mutex<HashMap<String, TypeInfo>>,
+    move_cache: Mutex<HashMap<String, MoveInfo>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -63,6 +65,57 @@ struct MatchupEntry {
     type_name: String,
     attack: f64,
     defense: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MoveInfo {
+    id: u32,
+    name: String,
+    type_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TeamData {
+    next_entry_id: u64,
+    entries: Vec<TeamEntry>,
+    current_team: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TeamEntry {
+    id: u64,
+    pokemon_name: String,
+    nickname: String,
+    level: u8,
+    moves: Vec<Option<MoveInfo>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TeamPokemonDetails {
+    name: String,
+    display_name: String,
+    image: String,
+    pokemon_types: Vec<TypeBadge>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TeamStateView {
+    entries: Vec<TeamEntry>,
+    current_team_ids: Vec<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TeamEntryInput {
+    id: Option<u64>,
+    pokemon_name: String,
+    nickname: String,
+    level: u8,
+    moves: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +172,14 @@ struct NamedApiResource {
 }
 
 #[derive(Debug, Deserialize)]
+struct MoveApiResponse {
+    id: u32,
+    name: String,
+    #[serde(rename = "type")]
+    type_info: NamedApiResource,
+}
+
+#[derive(Debug, Deserialize)]
 struct TypeApiResponse {
     name: String,
     sprites: TypeSprites,
@@ -162,6 +223,10 @@ fn capitalize(value: &str) -> String {
 
 fn cache_file_path(root: &Path, category: &str, key: &str) -> PathBuf {
     root.join(category).join(format!("{key}.json"))
+}
+
+fn data_file_path(root: &Path, file_name: &str) -> PathBuf {
+    root.join(file_name)
 }
 
 fn is_cache_fresh(path: &Path) -> Result<bool, String> {
@@ -211,6 +276,36 @@ where
         .map_err(|error| format!("Failed to serialize cache value: {error}"))?;
 
     fs::write(path, content).map_err(|error| format!("Failed to write cache file: {error}"))
+}
+
+fn read_data_file<T>(root: &Path, file_name: &str) -> Result<Option<T>, String>
+where
+    T: DeserializeOwned,
+{
+    let path = data_file_path(root, file_name);
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let content =
+        fs::read_to_string(path).map_err(|error| format!("Failed to read data file: {error}"))?;
+
+    serde_json::from_str(&content)
+        .map(Some)
+        .map_err(|error| format!("Failed to parse data file: {error}"))
+}
+
+fn write_data_file<T>(root: &Path, file_name: &str, value: &T) -> Result<(), String>
+where
+    T: Serialize,
+{
+    fs::create_dir_all(root).map_err(|error| format!("Failed to create data directory: {error}"))?;
+
+    let content = serde_json::to_string_pretty(value)
+        .map_err(|error| format!("Failed to serialize data value: {error}"))?;
+
+    fs::write(data_file_path(root, file_name), content)
+        .map_err(|error| format!("Failed to write data file: {error}"))
 }
 
 async fn fetch_json<T>(client: &reqwest::Client, path: &str) -> Result<T, String>
@@ -276,6 +371,40 @@ fn write_type_cache(state: &AppState, key: String, value: TypeInfo) -> Result<()
     }
 
     write_file_cache(&state.cache_root, "types", &key, &value)
+}
+
+fn read_move_cache(state: &AppState, key: &str) -> Result<Option<MoveInfo>, String> {
+    let cache = state
+        .move_cache
+        .lock()
+        .map_err(|_| "Move cache lock was poisoned".to_string())?;
+
+    Ok(cache.get(key).cloned())
+}
+
+fn write_move_cache(state: &AppState, key: String, value: MoveInfo) -> Result<(), String> {
+    {
+        let mut cache = state
+            .move_cache
+            .lock()
+            .map_err(|_| "Move cache lock was poisoned".to_string())?;
+
+        cache.insert(key.clone(), value.clone());
+    }
+
+    write_file_cache(&state.cache_root, "moves", &key, &value)
+}
+
+fn read_team_data(state: &AppState) -> Result<TeamData, String> {
+    Ok(read_data_file::<TeamData>(&state.data_root, "team.json")?.unwrap_or(TeamData {
+        next_entry_id: 1,
+        entries: Vec::new(),
+        current_team: Vec::new(),
+    }))
+}
+
+fn write_team_data(state: &AppState, team_data: &TeamData) -> Result<(), String> {
+    write_data_file(&state.data_root, "team.json", team_data)
 }
 
 async fn get_pokemon_info(state: &AppState, name: &str) -> Result<PokemonInfo, String> {
@@ -376,12 +505,133 @@ async fn get_type_info(state: &AppState, name: &str) -> Result<TypeInfo, String>
     Ok(info)
 }
 
+async fn get_move_info(state: &AppState, name: &str) -> Result<MoveInfo, String> {
+    if let Some(cached) = read_move_cache(state, name)? {
+        return Ok(cached);
+    }
+
+    if let Some(cached) = read_file_cache::<MoveInfo>(&state.cache_root, "moves", name)? {
+        write_move_cache(state, name.to_string(), cached.clone())?;
+        return Ok(cached);
+    }
+
+    let move_data = fetch_json::<MoveApiResponse>(&state.client, &format!("move/{name}")).await?;
+    let info = MoveInfo {
+        id: move_data.id,
+        name: move_data.name,
+        type_name: move_data.type_info.name,
+    };
+
+    write_move_cache(state, name.to_string(), info.clone())?;
+    Ok(info)
+}
+
 fn into_badge(type_info: &TypeInfo) -> TypeBadge {
     TypeBadge {
         name: type_info.name.clone(),
         display_name: type_info.display_name.clone(),
         image: type_info.image.clone(),
     }
+}
+
+fn normalize_name(value: &str) -> String {
+    value
+        .trim()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("-")
+        .to_lowercase()
+}
+
+fn into_team_state_view(team_data: &TeamData) -> TeamStateView {
+    TeamStateView {
+        entries: team_data.entries.clone(),
+        current_team_ids: team_data.current_team.clone(),
+    }
+}
+
+async fn validate_team_entry(
+    state: &AppState,
+    input: TeamEntryInput,
+    existing_id: Option<u64>,
+) -> Result<TeamEntry, String> {
+    if !(1..=100).contains(&input.level) {
+        return Err("Level must be between 1 and 100.".to_string());
+    }
+
+    if input.moves.len() != 4 {
+        return Err("Exactly 4 move slots are required.".to_string());
+    }
+
+    let normalized_pokemon = normalize_name(&input.pokemon_name);
+    if normalized_pokemon.is_empty() {
+        return Err("Please enter a Pokemon name.".to_string());
+    }
+
+    let pokemon = get_pokemon_info(state, &normalized_pokemon)
+        .await
+        .map_err(|error| {
+            format!(
+                "Pokemon '{}' not found: {}",
+                input.pokemon_name.trim(),
+                error
+            )
+        })?;
+    let mut validated_moves = Vec::with_capacity(4);
+
+    for (_index, move_name) in input.moves.into_iter().enumerate() {
+        let normalized_move = normalize_name(&move_name);
+        if normalized_move.is_empty() {
+            validated_moves.push(None);
+            continue;
+        }
+
+        let move_info = get_move_info(state, &normalized_move)
+            .await
+            .map_err(|_error| {
+                format!(
+                    "Move '{}' not found",
+                    move_name.trim(),
+                )
+            })?;
+        validated_moves.push(Some(move_info));
+    }
+
+    Ok(TeamEntry {
+        id: existing_id.unwrap_or_default(),
+        pokemon_name: pokemon.name,
+        nickname: input.nickname.trim().to_string(),
+        level: input.level,
+        moves: validated_moves,
+    })
+}
+
+#[tauri::command]
+async fn get_team_pokemon_details(
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<TeamPokemonDetails, String> {
+    let normalized_name = normalize_name(&name);
+    if normalized_name.is_empty() {
+        return Err("Please enter a Pokemon name.".to_string());
+    }
+
+    let pokemon = get_pokemon_info(&state, &normalized_name)
+        .await
+        .map_err(|error| format!("Pokemon '{}' not found: {}", name.trim(), error))?;
+
+    let mut pokemon_types = Vec::new();
+    for type_name in &pokemon.types {
+        let type_info = get_type_info(&state, type_name).await?;
+        pokemon_types.push(into_badge(&type_info));
+    }
+
+    Ok(TeamPokemonDetails {
+        name: pokemon.name,
+        display_name: pokemon.display_name,
+        image: pokemon.image,
+        pokemon_types,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -539,6 +789,84 @@ async fn get_pokemon_matchup(
     })
 }
 
+#[tauri::command]
+fn get_team_state(state: State<'_, AppState>) -> Result<TeamStateView, String> {
+    let team_data = read_team_data(&state)?;
+    Ok(into_team_state_view(&team_data))
+}
+
+#[tauri::command]
+async fn save_team_entry(
+    input: TeamEntryInput,
+    state: State<'_, AppState>,
+) -> Result<TeamStateView, String> {
+    let mut team_data = read_team_data(&state)?;
+
+    let existing_index = input
+        .id
+        .and_then(|entry_id| team_data.entries.iter().position(|entry| entry.id == entry_id));
+
+    let existing_id = input.id;
+    let mut validated_entry = validate_team_entry(&state, input, existing_id).await?;
+
+    match existing_index {
+        Some(index) => {
+            validated_entry.id = team_data.entries[index].id;
+            team_data.entries[index] = validated_entry;
+        }
+        None => {
+            validated_entry.id = team_data.next_entry_id;
+            team_data.next_entry_id += 1;
+            team_data.entries.push(validated_entry);
+        }
+    }
+
+    write_team_data(&state, &team_data)?;
+    Ok(into_team_state_view(&team_data))
+}
+
+#[tauri::command]
+fn delete_team_entry(entry_id: u64, state: State<'_, AppState>) -> Result<TeamStateView, String> {
+    let mut team_data = read_team_data(&state)?;
+    let initial_len = team_data.entries.len();
+    team_data.entries.retain(|entry| entry.id != entry_id);
+
+    if team_data.entries.len() == initial_len {
+        return Err("Team entry not found.".to_string());
+    }
+
+    team_data.current_team.retain(|id| *id != entry_id);
+    write_team_data(&state, &team_data)?;
+    Ok(into_team_state_view(&team_data))
+}
+
+#[tauri::command]
+fn set_team_member(
+    entry_id: u64,
+    selected: bool,
+    state: State<'_, AppState>,
+) -> Result<TeamStateView, String> {
+    let mut team_data = read_team_data(&state)?;
+    if !team_data.entries.iter().any(|entry| entry.id == entry_id) {
+        return Err("Team entry not found.".to_string());
+    }
+
+    if selected {
+        if !team_data.current_team.contains(&entry_id) {
+            if team_data.current_team.len() >= 6 {
+                return Err("Your current team can only have 6 Pokemon.".to_string());
+            }
+
+            team_data.current_team.push(entry_id);
+        }
+    } else {
+        team_data.current_team.retain(|id| *id != entry_id);
+    }
+
+    write_team_data(&state, &team_data)?;
+    Ok(into_team_state_view(&team_data))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -547,18 +875,31 @@ pub fn run() {
                 .path()
                 .app_cache_dir()
                 .map_err(|error| format!("Failed to resolve cache directory: {error}"))?;
+            let data_root = app
+                .path()
+                .app_data_dir()
+                .map_err(|error| format!("Failed to resolve app data directory: {error}"))?;
 
             app.manage(AppState {
                 client: reqwest::Client::new(),
                 cache_root,
+                data_root,
                 pokemon_cache: Mutex::new(HashMap::new()),
                 type_cache: Mutex::new(HashMap::new()),
+                move_cache: Mutex::new(HashMap::new()),
             });
 
             Ok(())
         })
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![get_pokemon_matchup])
+        .invoke_handler(tauri::generate_handler![
+            get_pokemon_matchup,
+            get_team_state,
+            get_team_pokemon_details,
+            save_team_entry,
+            delete_team_entry,
+            set_team_member
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

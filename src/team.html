@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>My Pokemon Team</title>
+    <link rel="icon" href="icon.png" type="image/x-icon">
+    <script type="module" src="/team.js" defer></script>
+  </head>
+
+  <body>
+    <main class="container team-page">
+      <nav class="page-nav">
+        <a class="nav-link" href="index.html">Lookup</a>
+        <a class="nav-link active" href="team.html" data-desktop-only hidden>Team</a>
+      </nav>
+
+      <section class="team-layout">
+        <div class="team-column">
+          <section class="panel">
+            <div class="panel-header">
+              <h2>Team</h2>
+              <span id="currentTeamCount" class="panel-count">0 / 6</span>
+            </div>
+            <div id="currentTeamTiles" class="team-tile-grid empty-state">Empty</div>
+            <div id="currentTeamDetail" class="team-detail-slot" hidden></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <h2>Box</h2>
+            </div>
+            <div id="boxTiles" class="team-tile-grid empty-state">Empty.</div>
+            <div id="boxDetail" class="team-detail-slot" hidden></div>
+          </section>
+        </div>
+
+        <section class="panel team-form-panel">
+          <div class="panel-header">
+            <h2 id="formTitle">Add Pokemon</h2>
+          </div>
+
+          <form id="teamForm" class="team-form">
+            <input type="hidden" id="entryId" name="entryId" />
+
+            <label class="field">
+              <span>Pokemon</span>
+              <input type="text" id="pokemonNameInput" name="pokemonName" placeholder="e.g. Pikachu" required />
+            </label>
+
+            <label class="field">
+              <span>Nickname</span>
+              <input type="text" id="nicknameInput" name="nickname" placeholder="Optional nickname" />
+            </label>
+
+            <label class="field">
+              <span>Level</span>
+              <input type="number" id="levelInput" name="level" min="1" max="100" value="50" required />
+            </label>
+
+            <div class="field-group">
+              <span>Moves</span>
+              <label class="field">
+                <input type="text" id="move1Input" name="move1" placeholder="Move 1" />
+              </label>
+              <label class="field">
+                <input type="text" id="move2Input" name="move2" placeholder="Move 2" />
+              </label>
+              <label class="field">
+                <input type="text" id="move3Input" name="move3" placeholder="Move 3" />
+              </label>
+              <label class="field">
+                <input type="text" id="move4Input" name="move4" placeholder="Move 4" />
+              </label>
+            </div>
+
+            <div class="form-actions">
+              <button type="submit" id="saveEntryButton">Save Pokemon</button>
+              <button type="button" id="cancelEditButton" class="secondary-button">Clear</button>
+            </div>
+          </form>
+        </section>
+      </section>
+    </main>
+  </body>
+</html>
